@@ -1,0 +1,147 @@
+.container {
+  padding: 0;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.emptyState {
+  text-align: center;
+  padding: 60px 20px;
+  color: #9CA3AF;
+  font-size: 16px;
+  background-color: #FFFFFF;
+  border-radius: 12px;
+  border: 2px dashed #E5E7EB;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background-color: #FFFFFF;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.table thead {
+  background: linear-gradient(135deg, #0D6E46 0%, #10B981 100%);
+  color: white;
+  position: sticky;
+  top: 0;
+}
+
+.table th {
+  padding: 16px;
+  text-align: left;
+  font-weight: 700;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.table td {
+  padding: 16px;
+  border-bottom: 1px solid #F3F4F6;
+  font-size: 14px;
+  color: #1F2937;
+}
+
+.table tbody tr {
+  transition: background-color 0.2s ease;
+}
+
+.table tbody tr:hover {
+  background-color: #F9FAFB;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.gradeValue {
+  font-weight: 700;
+  color: #10B981;
+  font-size: 16px;
+}
+
+.editBtn {
+  padding: 8px 14px;
+  background-color: #10B981;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.editBtn:hover {
+  background-color: #059669;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  transform: translateY(-2px);
+}
+
+.editBtn:active {
+  transform: scale(0.98);
+}
+
+.editBtn:disabled {
+  background-color: #D1D5DB;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.deleteBtn {
+  padding: 8px 14px;
+  background-color: #EF4444;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.deleteBtn:hover {
+  background-color: #DC2626;
+  box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
+  transform: translateY(-2px);
+}
+
+.deleteBtn:active {
+  transform: scale(0.98);
+}
+
+.deleteBtn:disabled {
+  background-color: #D1D5DB;
+  cursor: not-allowed;
+  transform: none;
+}
+
+@media (max-width: 1024px) {
+  .table {
+    font-size: 12px;
+  }
+
+  .table th,
+  .table td {
+    padding: 12px;
+  }
+
+  .editBtn,
+  .deleteBtn {
+    padding: 6px 12px;
+    font-size: 12px;
+  }
+}
