@@ -118,18 +118,18 @@ created: date (auto)
 **Create Rules:**
 ```
 @request.auth.id != null && 
-(@request.auth.profile.role = "teacher" || @request.auth.profile.role = "admin")
+(@request.auth.role = "teacher" || @request.auth.role = "admin")
 ```
 
 **Update Rules:**
 ```
 @request.auth.id != null && 
-(@request.auth.profile.role = "teacher" || @request.auth.profile.role = "admin")
+(@request.auth.role = "teacher" || @request.auth.role = "admin")
 ```
 
 **Delete Rules:**
 ```
-@request.auth.id != null && @request.auth.profile.role = "admin"
+@request.auth.id != null && @request.auth.role = "admin"
 ```
 
 #### For `activity_logs` collection:

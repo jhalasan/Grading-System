@@ -1,6 +1,6 @@
 import { pb } from "./pocketbase";
 import { validateUserExists } from "./pocketbase";
-import { getClientIpAddressSync } from "./ipService";
+import { logGradeOperation } from "./logService";
 import type { Grade } from "../types/Grade";
 
 export const getAllGrades = async (): Promise<Grade[]> => {
@@ -72,15 +72,13 @@ export const createGrade = async (
 
     // Create log entry
     try {
-      await pb.collection("activity_logs").create({
-        user_id: userId,
-        action_type: "CREATE_GRADE",
-        record_id: newRecord.id,
-        old_value: JSON.stringify({}),
-        new_value: JSON.stringify(createdGradeWithExpand),
-        timestamp: new Date().toISOString(),
-        ip_address: getClientIpAddressSync(),
-      });
+      await logGradeOperation(
+        userId,
+        "CREATE_GRADE",
+        newRecord.id,
+        {},
+        createdGradeWithExpand
+      );
     } catch (logError) {
       console.error("Failed to create activity log (non-fatal):", logError);
       // Continue anyway - grade was created
@@ -111,28 +109,34 @@ export const updateGrade = async (
       expand: "student_id,last_modified_by",
     });
 
-    // 2. Update grade
-    await pb.collection("grades").update(gradeId, {
+    // 2. If this is the first modification, save the current grade as original_grade_value
+    const updateData: any = {
       grade_value: newGrade,
       last_modified_by: userId,
-    });
+    };
 
-    // 3. Get updated record with expanded data
+    // Only set original_grade_value if it hasn't been set yet
+    if (!oldRecord.original_grade_value) {
+      updateData.original_grade_value = oldRecord.grade_value;
+    }
+
+    // 3. Update grade
+    await pb.collection("grades").update(gradeId, updateData);
+
+    // 4. Get updated record with expanded data
     const updatedRecord = await pb.collection("grades").getOne(gradeId, {
       expand: "student_id,last_modified_by",
     });
 
-    // 4. Create log entry
+    // 5. Create log entry
     try {
-      await pb.collection("activity_logs").create({
-        user_id: userId,
-        action_type: "UPDATE_GRADE",
-        record_id: gradeId,
-        old_value: JSON.stringify(oldRecord),
-        new_value: JSON.stringify(updatedRecord),
-        timestamp: new Date().toISOString(),
-        ip_address: getClientIpAddressSync(),
-      });
+      await logGradeOperation(
+        userId,
+        "UPDATE_GRADE",
+        gradeId,
+        oldRecord,
+        updatedRecord
+      );
     } catch (logError) {
       console.error("Failed to create activity log (non-fatal):", logError);
       // Continue anyway - grade was updated
@@ -157,31 +161,28 @@ export const deleteGrade = async (
       throw new Error(`User with ID ${userId} does not exist in the database. Please ensure you are logged in with a valid user account.`);
     }
 
-    // 1. Get current record before deletion
+    // 1. Get current record before deletion (capture all data for the log)
     const oldRecord = await pb.collection("grades").getOne(gradeId, {
       expand: "student_id,last_modified_by",
     });
 
-    // 2. Delete grade first
+    // 2. Delete grade
     await pb.collection("grades").delete(gradeId);
 
-    // 3. Create log entry after successful deletion
+    // 3. Log the deletion using the dedicated logging function
     try {
-      await pb.collection("activity_logs").create({
-        user_id: userId,
-        action_type: "DELETE_GRADE",
-        record_id: gradeId,
-        old_value: JSON.stringify(oldRecord),
-        new_value: JSON.stringify({}),
-        timestamp: new Date().toISOString(),
-        ip_address: getClientIpAddressSync(),
-      });
-      console.log("Delete logged successfully for grade:", gradeId);
+      await logGradeOperation(
+        userId,
+        "DELETE_GRADE",
+        gradeId,
+        oldRecord,
+        {} // Empty object for new_value since the grade is deleted
+      );
     } catch (logError: any) {
-      console.error("Failed to create activity log for deletion:", logError);
-      console.error("Log error details:", logError?.response?.data || logError?.message);
-      // Note: We don't throw here because the grade was already deleted
-      // But we log the error for debugging
+      // Log error but don't fail the deletion - grade was already deleted successfully
+      console.error("Warning: Grade deleted but logging failed:", logError?.message);
+      // Re-throw to inform user about the logging failure
+      throw new Error(`Grade deleted successfully, but failed to record the action in logs: ${logError?.message}`);
     }
   } catch (error: any) {
     console.error("Error deleting grade:", error);

@@ -25,9 +25,11 @@ export default function Dashboard({ currentUser }: DashboardProps) {
         const gradesResult = await getAllGrades();
         setTotalGrades(gradesResult.length);
 
-        // Fetch recent logs (last 10)
-        const logs = await getActivityLogs();
-        setRecentLogs(logs.slice(0, 10));
+        // Fetch recent logs only for admins
+        if (currentUser?.role === 'admin') {
+          const logs = await getActivityLogs();
+          setRecentLogs(logs.slice(0, 10));
+        }
       } catch (err) {
         setError('Failed to load dashboard data');
         console.error(err);
@@ -37,7 +39,7 @@ export default function Dashboard({ currentUser }: DashboardProps) {
     };
 
     fetchData();
-  }, []);
+  }, [currentUser?.role]);
 
   return (
     <div>
@@ -105,7 +107,21 @@ export default function Dashboard({ currentUser }: DashboardProps) {
               <i className="bi bi-activity" style={{ fontSize: '24px', color: '#10B981' }}></i>
               Recent Activity
             </h2>
-            <ActivityLogTable logs={recentLogs} />
+            {currentUser?.role === 'admin' ? (
+              <ActivityLogTable logs={recentLogs} />
+            ) : (
+              <div style={{
+                padding: '20px',
+                backgroundColor: '#F3F4F6',
+                borderRadius: '12px',
+                border: '1px solid #E5E7EB',
+                textAlign: 'center',
+                color: '#6B7280'
+              }}>
+                <i className="bi bi-lock" style={{ fontSize: '24px', marginBottom: '10px', display: 'block' }}></i>
+                <p>Activity logs are only visible to administrators.</p>
+              </div>
+            )}
           </div>
         </>
       )}

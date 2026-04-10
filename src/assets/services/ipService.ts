@@ -95,3 +95,35 @@ export const getClientIpAddressSync = (): string => {
 
   return '127.0.0.1';
 };
+
+/**
+ * Device Detection Service
+ * Detects device type, browser, and operating system
+ */
+export const getDeviceInfo = (): string => {
+  const userAgent = navigator.userAgent;
+  
+  // Detect device type
+  let deviceType = 'Desktop';
+  if (/Mobile|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent)) {
+    deviceType = /iPad/.test(userAgent) ? 'Tablet' : 'Mobile';
+  }
+  
+  // Detect OS
+  let os = 'Unknown';
+  if (/Windows NT/.test(userAgent)) os = 'Windows';
+  else if (/Macintosh|MacIntel|MacPPC|Mac68K/.test(userAgent)) os = 'macOS';
+  else if (/Linux|X11/.test(userAgent)) os = 'Linux';
+  else if (/iPhone|iPad|iPod/.test(userAgent)) os = 'iOS';
+  else if (/Android/.test(userAgent)) os = 'Android';
+  
+  // Detect browser
+  let browser = 'Unknown';
+  if (/Edg/.test(userAgent)) browser = 'Edge';
+  else if (/Chrome/.test(userAgent)) browser = 'Chrome';
+  else if (/Firefox/.test(userAgent)) browser = 'Firefox';
+  else if (/Safari/.test(userAgent)) browser = 'Safari';
+  else if (/Opera|OPR/.test(userAgent)) browser = 'Opera';
+  
+  return `${deviceType} - ${os} - ${browser}`;
+};

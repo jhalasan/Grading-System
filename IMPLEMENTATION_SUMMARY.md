@@ -274,7 +274,10 @@ activity_logs:  id, user_id (rel), action_type, record_id,
 ```
 grades (Update):
   @request.auth.id != null && 
-  (@request.auth.profile.role = "teacher" || role = "admin")
+  (@request.auth.role = "teacher" || @request.auth.role = "admin")
+
+grades (Delete):
+  @request.auth.id != null && @request.auth.role = "admin"
 
 activity_logs (Delete):
   false  ← Prevent deletion

@@ -8048,6 +8048,121 @@ const getClientIpAddressSync = () => {
   }
   return "127.0.0.1";
 };
+const getActivityLogs = async () => {
+  try {
+    const records = await pb.collection("activity_logs").getFullList({
+      expand: "user_id",
+      sort: "-timestamp"
+    });
+    return records;
+  } catch (error) {
+    console.error("Error fetching activity logs:", error);
+    throw error;
+  }
+};
+const logAuthEvent = async (userId, actionType, userData) => {
+  try {
+    await pb.collection("activity_logs").create({
+      user_id: userId,
+      action_type: actionType,
+      record_id: userId,
+      old_value: JSON.stringify({}),
+      new_value: JSON.stringify(userData),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      ip_address: getClientIpAddressSync()
+    });
+  } catch (error) {
+    console.warn(`Failed to log ${actionType} event (non-fatal):`, error);
+  }
+};
+const logGradeOperation = async (userId, actionType, recordId, oldValue, newValue) => {
+  var _a;
+  try {
+    const logPayload = {
+      user_id: userId,
+      action_type: actionType,
+      record_id: recordId,
+      old_value: JSON.stringify(oldValue),
+      new_value: JSON.stringify(newValue),
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      ip_address: getClientIpAddressSync()
+    };
+    console.log(`Creating log entry with payload:`, logPayload);
+    await pb.collection("activity_logs").create(logPayload);
+    console.log(`Grade operation logged successfully: ${actionType} for record ${recordId}`);
+  } catch (error) {
+    console.error(`Failed to log ${actionType} event:`, error);
+    console.error(`Full error object:`, JSON.stringify(error, null, 2));
+    const errorDetails = ((_a = error == null ? void 0 : error.response) == null ? void 0 : _a.data) || (error == null ? void 0 : error.message) || "Unknown error";
+    console.error(`Error details for ${actionType}:`, errorDetails);
+    throw new Error(`Failed to log grade operation: ${(error == null ? void 0 : error.message) || "Unknown error"}`);
+  }
+};
+const getTeacherActivityStatus = async () => {
+  try {
+    const teachers = await pb.collection("users").getFullList({
+      filter: 'role = "teacher"'
+    });
+    console.log("DEBUG: Teachers data from PocketBase:", teachers);
+    if (teachers.length > 0) {
+      console.log("DEBUG: First teacher object keys:", Object.keys(teachers[0]));
+      console.log("DEBUG: First teacher email field:", teachers[0].email);
+    }
+    const loginLogoutLogs = await pb.collection("activity_logs").getFullList({
+      filter: `action_type = "LOGIN" || action_type = "LOGOUT"`,
+      expand: "user_id",
+      sort: "-timestamp"
+    });
+    const teacherStatusMap = /* @__PURE__ */ new Map();
+    teachers.forEach((teacher) => {
+      teacherStatusMap.set(teacher.id, {
+        userId: teacher.id,
+        teacherName: teacher.name,
+        teacherEmail: teacher.email,
+        isActive: false,
+        // Will be set based on activity below
+        lastLoginTime: null,
+        lastLogoutTime: null,
+        lastActivityTime: teacher.updated || teacher.created,
+        lastActivityType: null
+      });
+    });
+    const processedTeachers = /* @__PURE__ */ new Set();
+    loginLogoutLogs.forEach((log) => {
+      const teacherId = log.user_id;
+      if (teacherStatusMap.has(teacherId) && !processedTeachers.has(teacherId)) {
+        const teacher = teacherStatusMap.get(teacherId);
+        const logTimestamp = log.timestamp;
+        if (log.action_type === "LOGIN") {
+          teacher.lastLoginTime = logTimestamp;
+          teacher.lastActivityType = "LOGIN";
+          teacher.isActive = true;
+        } else if (log.action_type === "LOGOUT") {
+          teacher.lastLogoutTime = logTimestamp;
+          teacher.lastActivityType = "LOGOUT";
+          teacher.isActive = false;
+        }
+        teacher.lastActivityTime = logTimestamp;
+        processedTeachers.add(teacherId);
+      }
+    });
+    const teacherArray = Array.from(teacherStatusMap.values());
+    teacherArray.forEach((teacher) => {
+      const originalTeacher = teachers.find((t2) => t2.id === teacher.userId);
+      if (originalTeacher == null ? void 0 : originalTeacher.disabled_at) {
+        teacher.isActive = false;
+      }
+    });
+    return Array.from(teacherStatusMap.values()).sort((a, b) => {
+      const timeA = new Date(a.lastActivityTime).getTime();
+      const timeB = new Date(b.lastActivityTime).getTime();
+      return timeB - timeA;
+    });
+  } catch (error) {
+    console.error("Error fetching teacher activity status:", error);
+    throw error;
+  }
+};
 const getAllGrades = async () => {
   try {
     const records = await pb.collection("grades").getFullList({
@@ -8079,15 +8194,13 @@ const createGrade = async (studentId, subject, gradeValue2, userId) => {
       expand: "student_id,last_modified_by"
     });
     try {
-      await pb.collection("activity_logs").create({
-        user_id: userId,
-        action_type: "CREATE_GRADE",
-        record_id: newRecord.id,
-        old_value: JSON.stringify({}),
-        new_value: JSON.stringify(createdGradeWithExpand),
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-        ip_address: getClientIpAddressSync()
-      });
+      await logGradeOperation(
+        userId,
+        "CREATE_GRADE",
+        newRecord.id,
+        {},
+        createdGradeWithExpand
+      );
     } catch (logError) {
       console.error("Failed to create activity log (non-fatal):", logError);
     }
@@ -8107,23 +8220,25 @@ const updateGrade = async (gradeId, newGrade, userId) => {
     const oldRecord = await pb.collection("grades").getOne(gradeId, {
       expand: "student_id,last_modified_by"
     });
-    await pb.collection("grades").update(gradeId, {
+    const updateData = {
       grade_value: newGrade,
       last_modified_by: userId
-    });
+    };
+    if (!oldRecord.original_grade_value) {
+      updateData.original_grade_value = oldRecord.grade_value;
+    }
+    await pb.collection("grades").update(gradeId, updateData);
     const updatedRecord = await pb.collection("grades").getOne(gradeId, {
       expand: "student_id,last_modified_by"
     });
     try {
-      await pb.collection("activity_logs").create({
-        user_id: userId,
-        action_type: "UPDATE_GRADE",
-        record_id: gradeId,
-        old_value: JSON.stringify(oldRecord),
-        new_value: JSON.stringify(updatedRecord),
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-        ip_address: getClientIpAddressSync()
-      });
+      await logGradeOperation(
+        userId,
+        "UPDATE_GRADE",
+        gradeId,
+        oldRecord,
+        updatedRecord
+      );
     } catch (logError) {
       console.error("Failed to create activity log (non-fatal):", logError);
     }
@@ -8135,7 +8250,6 @@ const updateGrade = async (gradeId, newGrade, userId) => {
   }
 };
 const deleteGrade = async (gradeId, userId) => {
-  var _a;
   try {
     const userExists = await validateUserExists(userId);
     if (!userExists) {
@@ -8146,19 +8260,17 @@ const deleteGrade = async (gradeId, userId) => {
     });
     await pb.collection("grades").delete(gradeId);
     try {
-      await pb.collection("activity_logs").create({
-        user_id: userId,
-        action_type: "DELETE_GRADE",
-        record_id: gradeId,
-        old_value: JSON.stringify(oldRecord),
-        new_value: JSON.stringify({}),
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-        ip_address: getClientIpAddressSync()
-      });
-      console.log("Delete logged successfully for grade:", gradeId);
+      await logGradeOperation(
+        userId,
+        "DELETE_GRADE",
+        gradeId,
+        oldRecord,
+        {}
+        // Empty object for new_value since the grade is deleted
+      );
     } catch (logError) {
-      console.error("Failed to create activity log for deletion:", logError);
-      console.error("Log error details:", ((_a = logError == null ? void 0 : logError.response) == null ? void 0 : _a.data) || (logError == null ? void 0 : logError.message));
+      console.error("Warning: Grade deleted but logging failed:", logError == null ? void 0 : logError.message);
+      throw new Error(`Grade deleted successfully, but failed to record the action in logs: ${logError == null ? void 0 : logError.message}`);
     }
   } catch (error) {
     console.error("Error deleting grade:", error);
@@ -8173,18 +8285,6 @@ const getUserName = async (userId) => {
   } catch (error) {
     console.error("Error fetching user:", error);
     return userId;
-  }
-};
-const getActivityLogs = async () => {
-  try {
-    const records = await pb.collection("activity_logs").getFullList({
-      expand: "user_id",
-      sort: "-timestamp"
-    });
-    return records;
-  } catch (error) {
-    console.error("Error fetching activity logs:", error);
-    throw error;
   }
 };
 const container$1 = "_container_1ggq0_1";
@@ -8307,8 +8407,10 @@ function Dashboard({ currentUser }) {
       try {
         const gradesResult = await getAllGrades();
         setTotalGrades(gradesResult.length);
-        const logs = await getActivityLogs();
-        setRecentLogs(logs.slice(0, 10));
+        if ((currentUser == null ? void 0 : currentUser.role) === "admin") {
+          const logs = await getActivityLogs();
+          setRecentLogs(logs.slice(0, 10));
+        }
       } catch (err) {
         setError("Failed to load dashboard data");
         console.error(err);
@@ -8317,7 +8419,7 @@ function Dashboard({ currentUser }) {
       }
     };
     fetchData();
-  }, []);
+  }, [currentUser == null ? void 0 : currentUser.role]);
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "32px" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
@@ -8364,7 +8466,7 @@ function Dashboard({ currentUser }) {
     ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "20px", marginBottom: "40px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
-          StatCard,
+          StatCard$1,
           {
             title: "Total Grades",
             value: totalGrades,
@@ -8373,7 +8475,7 @@ function Dashboard({ currentUser }) {
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
-          StatCard,
+          StatCard$1,
           {
             title: "Recent Changes",
             value: recentLogs.length,
@@ -8387,7 +8489,17 @@ function Dashboard({ currentUser }) {
           /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-activity", style: { fontSize: "24px", color: "#10B981" } }),
           "Recent Activity"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(ActivityLogTable, { logs: recentLogs })
+        (currentUser == null ? void 0 : currentUser.role) === "admin" ? /* @__PURE__ */ jsxRuntimeExports.jsx(ActivityLogTable, { logs: recentLogs }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          padding: "20px",
+          backgroundColor: "#F3F4F6",
+          borderRadius: "12px",
+          border: "1px solid #E5E7EB",
+          textAlign: "center",
+          color: "#6B7280"
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-lock", style: { fontSize: "24px", marginBottom: "10px", display: "block" } }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Activity logs are only visible to administrators." })
+        ] })
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `
@@ -8397,7 +8509,7 @@ function Dashboard({ currentUser }) {
       ` })
   ] });
 }
-function StatCard({ title, value: value2, icon, color }) {
+function StatCard$1({ title, value: value2, icon, color }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(
     "div",
     {
@@ -9169,20 +9281,1562 @@ function Logs() {
       ` })
   ] });
 }
+function TeacherActivityMonitor() {
+  const [teachers, setTeachers] = reactExports.useState([]);
+  const [loading, setLoading] = reactExports.useState(true);
+  const [error, setError] = reactExports.useState(null);
+  const [filterStatus, setFilterStatus] = reactExports.useState("all");
+  reactExports.useEffect(() => {
+    const fetchTeachers = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const teacherData = await getTeacherActivityStatus();
+        setTeachers(teacherData);
+      } catch (err) {
+        setError("Failed to load teacher activity data");
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchTeachers();
+    const interval = setInterval(fetchTeachers, 3e4);
+    return () => clearInterval(interval);
+  }, []);
+  const filteredTeachers = teachers.filter((teacher) => {
+    if (filterStatus === "active") return teacher.isActive;
+    if (filterStatus === "inactive") return !teacher.isActive;
+    return true;
+  });
+  const activeCount = teachers.filter((t2) => t2.isActive).length;
+  const inactiveCount = teachers.filter((t2) => !t2.isActive).length;
+  const formatDate = (dateString) => {
+    if (!dateString) return "Never";
+    const date = new Date(dateString);
+    return date.toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    });
+  };
+  const getTimeAgo = (dateString) => {
+    const date = new Date(dateString);
+    const now = /* @__PURE__ */ new Date();
+    const secondsAgo = (now.getTime() - date.getTime()) / 1e3;
+    if (secondsAgo < 60) return "Just now";
+    if (secondsAgo < 3600) return `${Math.floor(secondsAgo / 60)}m ago`;
+    if (secondsAgo < 86400) return `${Math.floor(secondsAgo / 3600)}h ago`;
+    return `${Math.floor(secondsAgo / 86400)}d ago`;
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "40px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "h2",
+      {
+        style: {
+          fontSize: "20px",
+          marginBottom: "20px",
+          display: "flex",
+          alignItems: "center",
+          gap: "8px"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "i",
+            {
+              className: "bi bi-people-fill",
+              style: { fontSize: "24px", color: "#10B981" }
+            }
+          ),
+          "Teacher Activity Monitor"
+        ]
+      }
+    ),
+    error && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          color: "#DC2626",
+          marginBottom: "20px",
+          padding: "14px 16px",
+          backgroundColor: "#FEE2E2",
+          borderRadius: "12px",
+          border: "1px solid #FECACA",
+          display: "flex",
+          alignItems: "flex-start",
+          gap: "12px"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "i",
+            {
+              className: "bi bi-exclamation-circle",
+              style: { marginTop: "2px", fontSize: "18px", flexShrink: 0 }
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: error })
+        ]
+      }
+    ),
+    loading ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "center", padding: "40px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "i",
+        {
+          className: "bi bi-hourglass-split",
+          style: {
+            fontSize: "32px",
+            color: "#10B981",
+            animation: "spin 1s linear infinite"
+          }
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { marginTop: "16px", color: "#6B7280" }, children: "Loading teacher activity..." })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+            gap: "16px",
+            marginBottom: "24px"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              StatCard,
+              {
+                title: "Total Teachers",
+                value: teachers.length,
+                icon: "bi-people",
+                color: "#0EA5E9"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              StatCard,
+              {
+                title: "Active Now",
+                value: activeCount,
+                icon: "bi-check-circle-fill",
+                color: "#10B981"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              StatCard,
+              {
+                title: "Inactive",
+                value: inactiveCount,
+                icon: "bi-x-circle-fill",
+                color: "#EF4444"
+              }
+            )
+          ]
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "8px", marginBottom: "20px" }, children: ["all", "active", "inactive"].map((status) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => setFilterStatus(status),
+          style: {
+            padding: "8px 16px",
+            borderRadius: "8px",
+            border: filterStatus === status ? "2px solid #10B981" : "1px solid #E5E7EB",
+            backgroundColor: filterStatus === status ? "#ECFDF5" : "#FFFFFF",
+            color: filterStatus === status ? "#10B981" : "#6B7280",
+            cursor: "pointer",
+            fontWeight: filterStatus === status ? "600" : "500",
+            fontSize: "14px",
+            transition: "all 0.2s ease"
+          },
+          onMouseEnter: (e2) => {
+            if (filterStatus !== status) {
+              e2.currentTarget.style.backgroundColor = "#F9FAFB";
+            }
+          },
+          onMouseLeave: (e2) => {
+            if (filterStatus !== status) {
+              e2.currentTarget.style.backgroundColor = "#FFFFFF";
+            }
+          },
+          children: status.charAt(0).toUpperCase() + status.slice(1)
+        },
+        status
+      )) }),
+      filteredTeachers.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            textAlign: "center",
+            padding: "40px",
+            backgroundColor: "#F9FAFB",
+            borderRadius: "12px",
+            border: "1px solid #E5E7EB"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "i",
+              {
+                className: "bi bi-inbox",
+                style: { fontSize: "32px", color: "#9CA3AF", marginBottom: "12px", display: "block" }
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { color: "#6B7280", margin: 0 }, children: "No teachers found" })
+          ]
+        }
+      ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "div",
+        {
+          style: {
+            overflowX: "auto",
+            borderRadius: "12px",
+            border: "1px solid #E5E7EB",
+            backgroundColor: "#FFFFFF",
+            boxShadow: "0 1px 3px rgba(0, 0, 0, 0.1)"
+          },
+          children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "table",
+            {
+              style: {
+                width: "100%",
+                borderCollapse: "collapse",
+                fontSize: "14px",
+                tableLayout: "fixed"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("colgroup", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("col", { style: { width: "18%" } }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("col", { style: { width: "25%" } }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("col", { style: { width: "12%" } }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("col", { style: { width: "18%" } }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("col", { style: { width: "27%" } })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("thead", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "tr",
+                  {
+                    style: {
+                      backgroundColor: "#F9FAFB",
+                      borderBottom: "1px solid #E5E7EB"
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "th",
+                        {
+                          style: {
+                            padding: "16px",
+                            textAlign: "left",
+                            fontWeight: "600",
+                            color: "#374151",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap"
+                          },
+                          children: "Name"
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "th",
+                        {
+                          style: {
+                            padding: "16px",
+                            textAlign: "left",
+                            fontWeight: "600",
+                            color: "#374151",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap"
+                          },
+                          children: "Email"
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "th",
+                        {
+                          style: {
+                            padding: "16px",
+                            textAlign: "left",
+                            fontWeight: "600",
+                            color: "#374151",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap"
+                          },
+                          children: "Status"
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "th",
+                        {
+                          style: {
+                            padding: "16px",
+                            textAlign: "left",
+                            fontWeight: "600",
+                            color: "#374151",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap"
+                          },
+                          children: "Last Activity"
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "th",
+                        {
+                          style: {
+                            padding: "16px",
+                            textAlign: "left",
+                            fontWeight: "600",
+                            color: "#374151",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap"
+                          },
+                          children: "Last Activity Time"
+                        }
+                      )
+                    ]
+                  }
+                ) }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: filteredTeachers.map((teacher, index) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "tr",
+                  {
+                    style: {
+                      borderBottom: index < filteredTeachers.length - 1 ? "1px solid #E5E7EB" : "none",
+                      backgroundColor: index % 2 === 0 ? "#FFFFFF" : "#F9FAFB",
+                      transition: "background-color 0.2s ease"
+                    },
+                    onMouseEnter: (e2) => {
+                      e2.currentTarget.style.backgroundColor = "#F3F4F6";
+                    },
+                    onMouseLeave: (e2) => {
+                      e2.currentTarget.style.backgroundColor = index % 2 === 0 ? "#FFFFFF" : "#F9FAFB";
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "16px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(
+                          "i",
+                          {
+                            className: "bi bi-person-circle",
+                            style: {
+                              fontSize: "20px",
+                              color: "#10B981",
+                              flexShrink: 0
+                            }
+                          }
+                        ),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: "500", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: teacher.teacherName, children: teacher.teacherName })
+                      ] }) }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "16px", color: "#6B7280", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: teacher.teacherEmail, children: teacher.teacherEmail }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "td",
+                        {
+                          style: {
+                            padding: "16px",
+                            textAlign: "left"
+                          },
+                          children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                            "span",
+                            {
+                              style: {
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: "6px",
+                                padding: "6px 12px",
+                                borderRadius: "8px",
+                                fontWeight: "500",
+                                fontSize: "13px",
+                                backgroundColor: teacher.isActive ? "#DCFCE7" : "#FEE2E2",
+                                color: teacher.isActive ? "#15803D" : "#991B1B"
+                              },
+                              children: [
+                                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                                  "i",
+                                  {
+                                    className: `bi ${teacher.isActive ? "bi-check-circle-fill" : "bi-x-circle-fill"}`
+                                  }
+                                ),
+                                teacher.isActive ? "Active" : "Inactive"
+                              ]
+                            }
+                          )
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "16px", color: "#6B7280" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(
+                          "i",
+                          {
+                            className: `bi ${teacher.lastActivityType === "LOGIN" ? "bi-box-arrow-in-right" : "bi-box-arrow-right"}`,
+                            style: {
+                              color: teacher.lastActivityType === "LOGIN" ? "#10B981" : "#EF4444"
+                            }
+                          }
+                        ),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: teacher.lastActivityType === "LOGIN" ? "Logged In" : "Logged Out" })
+                      ] }) }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "16px", color: "#6B7280" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                        "div",
+                        {
+                          style: {
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "4px"
+                          },
+                          children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: "500" }, children: getTimeAgo(teacher.lastActivityTime) }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "span",
+                              {
+                                style: {
+                                  fontSize: "12px",
+                                  color: "#9CA3AF"
+                                },
+                                title: formatDate(teacher.lastActivityTime),
+                                children: formatDate(teacher.lastActivityTime)
+                              }
+                            )
+                          ]
+                        }
+                      ) })
+                    ]
+                  },
+                  teacher.userId
+                )) })
+              ]
+            }
+          )
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      ` })
+  ] });
+}
+function StatCard({
+  title,
+  value: value2,
+  icon,
+  color
+}) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        padding: "20px",
+        border: "1px solid #E5E7EB",
+        borderRadius: "12px",
+        backgroundColor: "#FFFFFF",
+        boxShadow: "0 1px 3px rgba(0, 0, 0, 0.1)",
+        transition: "all 0.3s ease",
+        cursor: "default"
+      },
+      onMouseEnter: (e2) => {
+        e2.currentTarget.style.boxShadow = "0 10px 15px rgba(0, 0, 0, 0.1)";
+        e2.currentTarget.style.transform = "translateY(-4px)";
+      },
+      onMouseLeave: (e2) => {
+        e2.currentTarget.style.boxShadow = "0 1px 3px rgba(0, 0, 0, 0.1)";
+        e2.currentTarget.style.transform = "translateY(0)";
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "flex-start",
+              justifyContent: "space-between",
+              marginBottom: "12px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "p",
+                {
+                  style: {
+                    margin: 0,
+                    color: "#6B7280",
+                    fontSize: "13px",
+                    fontWeight: "600"
+                  },
+                  children: title
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "div",
+                {
+                  style: {
+                    width: "36px",
+                    height: "36px",
+                    borderRadius: "10px",
+                    backgroundColor: `${color}15`,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color,
+                    fontSize: "18px"
+                  },
+                  children: /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: `bi ${icon}` })
+                }
+              )
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { margin: 0, fontSize: "28px", fontWeight: "700", color: "#111827" }, children: value2 })
+      ]
+    }
+  );
+}
+function TeacherMonitor() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: /* @__PURE__ */ jsxRuntimeExports.jsx(TeacherActivityMonitor, {}) });
+}
+const forceLogoutUser = async (userId, reason = "Unauthorized access") => {
+  try {
+    const adminUser = pb.authStore.record;
+    if (!adminUser || adminUser.role !== "admin") {
+      throw new Error("Only admins can force logout users");
+    }
+    await logAuthEvent(userId, "FORCED_LOGOUT", {
+      reason,
+      forcedBy: adminUser.id,
+      forcedByEmail: adminUser.email,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    console.log(`Forced logout initiated for user ${userId}. Reason: ${reason}`);
+  } catch (error) {
+    console.error("Failed to force logout user:", error);
+    throw new Error((error == null ? void 0 : error.message) || "Failed to force logout user");
+  }
+};
+const resetUserPassword = async (userId, temporaryPassword) => {
+  try {
+    const adminUser = pb.authStore.record;
+    if (!adminUser || adminUser.role !== "admin") {
+      throw new Error("Only admins can reset passwords");
+    }
+    console.debug("Attempting password reset for user:", userId);
+    console.debug("Admin user:", { id: adminUser.id, role: adminUser.role, email: adminUser.email });
+    console.debug("Temporary password length:", temporaryPassword.length);
+    if (temporaryPassword.length < 8) {
+      throw new Error(`Password must be at least 8 characters (currently ${temporaryPassword.length})`);
+    }
+    console.debug("Sending password update with empty oldPassword...");
+    const response = await fetch(`http://127.0.0.1:8090/api/collections/users/records/${userId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": pb.authStore.token
+      },
+      body: JSON.stringify({
+        password: temporaryPassword,
+        passwordConfirm: temporaryPassword,
+        oldPassword: ""
+        // Send empty oldPassword
+      })
+    });
+    if (!response.ok) {
+      const errorData = await response.json();
+      console.error("Password update failed:", errorData);
+      throw new Error(JSON.stringify(errorData));
+    }
+    const updateResponse = await response.json();
+    console.debug("✓ Password update successful:", updateResponse);
+    await logAuthEvent(userId, "PASSWORD_RESET", {
+      resetBy: adminUser.id,
+      resetByEmail: adminUser.email,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      note: "User should change password on next login"
+    });
+    console.log(`✓ Password reset successful for user ${userId}`);
+  } catch (error) {
+    console.error("Failed to reset password:", {
+      userId,
+      errorMessage: error == null ? void 0 : error.message,
+      errorStatus: error == null ? void 0 : error.status,
+      errorData: error == null ? void 0 : error.data,
+      fullError: error
+    });
+    throw new Error((error == null ? void 0 : error.message) || "Failed to reset password");
+  }
+};
+const getAllUsers = async () => {
+  try {
+    const adminUser = pb.authStore.record;
+    if (!adminUser || adminUser.role !== "admin") {
+      throw new Error("Only admins can view all users");
+    }
+    const records = await pb.collection("users").getFullList({
+      sort: "-created"
+    });
+    return records;
+  } catch (error) {
+    console.error("Failed to fetch users:", error);
+    throw new Error((error == null ? void 0 : error.message) || "Failed to fetch users");
+  }
+};
+const disableUserAccount = async (userId, reason = "") => {
+  try {
+    const adminUser = pb.authStore.record;
+    if (!adminUser || adminUser.role !== "admin") {
+      throw new Error("Only admins can disable accounts");
+    }
+    await pb.collection("users").update(userId, {
+      disabled_at: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    await logAuthEvent(userId, "ACCOUNT_DISABLED", {
+      disabledBy: adminUser.id,
+      reason,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    console.log(`User account ${userId} disabled`);
+  } catch (error) {
+    console.error("Failed to disable account:", error);
+    throw new Error((error == null ? void 0 : error.message) || "Failed to disable account");
+  }
+};
+const enableUserAccount = async (userId) => {
+  try {
+    const adminUser = pb.authStore.record;
+    if (!adminUser || adminUser.role !== "admin") {
+      throw new Error("Only admins can enable accounts");
+    }
+    await pb.collection("users").update(userId, {
+      disabled_at: null
+    });
+    await logAuthEvent(userId, "ACCOUNT_ENABLED", {
+      enabledBy: adminUser.id,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    console.log(`User account ${userId} enabled`);
+  } catch (error) {
+    console.error("Failed to enable account:", error);
+    throw new Error((error == null ? void 0 : error.message) || "Failed to enable account");
+  }
+};
+const restoreGradeFromBackup = async (gradeId, reason = "") => {
+  try {
+    const adminUser = pb.authStore.record;
+    if (!adminUser || adminUser.role !== "admin") {
+      throw new Error("Only admins can restore grades");
+    }
+    const grade = await pb.collection("grades").getOne(gradeId, {
+      expand: "student_id,last_modified_by"
+    });
+    const gradeData = grade;
+    if (!gradeData.original_grade_value) {
+      throw new Error("No backup grade found for this record");
+    }
+    const oldValue = gradeData.grade_value;
+    const restoredValue = gradeData.original_grade_value;
+    const updatedGrade = await pb.collection("grades").update(gradeId, {
+      grade_value: restoredValue,
+      last_modified_by: adminUser.id
+    });
+    await logAuthEvent(adminUser.id, "GRADE_RESTORED", {
+      gradeId,
+      studentId: gradeData.student_id,
+      oldValue,
+      restoredValue,
+      reason,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    console.log(`Grade ${gradeId} restored from ${oldValue} to ${restoredValue}`);
+    return updatedGrade;
+  } catch (error) {
+    console.error("Failed to restore grade:", error);
+    throw new Error((error == null ? void 0 : error.message) || "Failed to restore grade");
+  }
+};
+const getGradesWithBackup = async () => {
+  try {
+    const adminUser = pb.authStore.record;
+    if (!adminUser || adminUser.role !== "admin") {
+      throw new Error("Only admins can view grade backups");
+    }
+    const records = await pb.collection("grades").getFullList({
+      expand: "student_id,last_modified_by",
+      sort: "-updated"
+    });
+    return records;
+  } catch (error) {
+    console.error("Failed to fetch grades with backup:", error);
+    throw new Error((error == null ? void 0 : error.message) || "Failed to fetch grades");
+  }
+};
+const getGradeChanges = async (gradeId) => {
+  var _a, _b;
+  try {
+    const grade = await pb.collection("grades").getOne(gradeId, {
+      expand: "last_modified_by"
+    });
+    const response = {
+      modified: false,
+      currentValue: grade.grade_value
+    };
+    if (grade.original_grade_value && grade.original_grade_value !== grade.grade_value) {
+      response.modified = true;
+      response.originalValue = grade.original_grade_value;
+      response.modifiedBy = (_b = (_a = grade.expand) == null ? void 0 : _a.last_modified_by) == null ? void 0 : _b.name;
+    }
+    return response;
+  } catch (error) {
+    console.error("Failed to get grade changes:", error);
+    throw new Error((error == null ? void 0 : error.message) || "Failed to get grade changes");
+  }
+};
+const migrateGradeBackups = async () => {
+  try {
+    const adminUser = pb.authStore.record;
+    if (!adminUser || adminUser.role !== "admin") {
+      throw new Error("Only admins can run migrations");
+    }
+    console.log("Starting grade backup migration...");
+    const grades = await pb.collection("grades").getFullList({
+      expand: "last_modified_by"
+    });
+    const updateLogs = await pb.collection("activity_logs").getFullList({
+      filter: 'action_type = "UPDATE_GRADE"',
+      sort: "timestamp"
+    });
+    let updated = 0;
+    let skipped = 0;
+    for (const grade of grades) {
+      if (grade.original_grade_value) {
+        console.log(`Skipped grade ${grade.id}: already has original_grade_value`);
+        skipped++;
+        continue;
+      }
+      const gradeUpdateLogs = updateLogs.filter((log) => log.record_id === grade.id);
+      if (gradeUpdateLogs.length > 0) {
+        const oldestLog = gradeUpdateLogs[0];
+        try {
+          let oldValueData;
+          if (typeof oldestLog.old_value === "string") {
+            oldValueData = JSON.parse(oldestLog.old_value);
+          } else {
+            oldValueData = oldestLog.old_value;
+          }
+          const originalValue = oldValueData.grade_value !== void 0 ? oldValueData.grade_value : oldValueData;
+          if (originalValue !== void 0 && originalValue !== null) {
+            await pb.collection("grades").update(grade.id, {
+              original_grade_value: originalValue
+            });
+            console.log(`✓ Updated grade ${grade.id}: original_grade_value = ${originalValue}`);
+            updated++;
+          } else {
+            console.warn(`Could not extract grade_value from log for grade ${grade.id}`);
+            skipped++;
+          }
+        } catch (parseError) {
+          console.warn(`Could not parse old_value for grade ${grade.id}:`, parseError);
+          skipped++;
+        }
+      } else {
+        console.log(`No UPDATE_GRADE logs found for grade ${grade.id}`);
+        skipped++;
+      }
+    }
+    console.log(`Migration complete: ${updated} grades updated, ${skipped} skipped`);
+    return { updated, skipped };
+  } catch (error) {
+    console.error("Grade backup migration failed:", error);
+    throw new Error((error == null ? void 0 : error.message) || "Grade backup migration failed");
+  }
+};
+const generateTemporaryPassword = () => {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%";
+  let password = "";
+  for (let i2 = 0; i2 < 12; i2++) {
+    password += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return password;
+};
+function AdminDashboard() {
+  var _a, _b;
+  const [users, setUsers] = reactExports.useState([]);
+  const [grades, setGrades] = reactExports.useState([]);
+  const [loading, setLoading] = reactExports.useState(true);
+  const [error, setError] = reactExports.useState(null);
+  const [activeTab, setActiveTab] = reactExports.useState("users");
+  const [selectedUser, setSelectedUser] = reactExports.useState(null);
+  const [showResetModal, setShowResetModal] = reactExports.useState(false);
+  const [showRestoreModal, setShowRestoreModal] = reactExports.useState(false);
+  const [selectedGrade, setSelectedGrade] = reactExports.useState(null);
+  const [restoreReason, setRestoreReason] = reactExports.useState("");
+  const [tempPassword, setTempPassword] = reactExports.useState("");
+  const [activityStatusMap, setActivityStatusMap] = reactExports.useState(/* @__PURE__ */ new Map());
+  const refreshGradesWithChanges = async () => {
+    try {
+      const gradesData = await getGradesWithBackup();
+      const gradesWithStatus = await Promise.all(
+        gradesData.map(async (grade) => {
+          try {
+            const changes = await getGradeChanges(grade.id);
+            return {
+              ...grade,
+              isModified: changes.modified,
+              modifiedBy: changes.modifiedBy
+            };
+          } catch {
+            return grade;
+          }
+        })
+      );
+      setGrades(gradesWithStatus);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to refresh grades");
+      console.error(err);
+    }
+  };
+  reactExports.useEffect(() => {
+    const fetchData = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const [usersData, gradesData, activityData] = await Promise.all([
+          getAllUsers(),
+          getGradesWithBackup(),
+          getTeacherActivityStatus()
+        ]);
+        setUsers(usersData);
+        const activityMap = /* @__PURE__ */ new Map();
+        activityData.forEach((status) => {
+          activityMap.set(status.userId, status);
+        });
+        setActivityStatusMap(activityMap);
+        const gradesWithStatus = await Promise.all(
+          gradesData.map(async (grade) => {
+            try {
+              const changes = await getGradeChanges(grade.id);
+              return {
+                ...grade,
+                isModified: changes.modified,
+                modifiedBy: changes.modifiedBy
+              };
+            } catch {
+              return grade;
+            }
+          })
+        );
+        setGrades(gradesWithStatus);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to load data");
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
+    const interval = setInterval(fetchData, 3e4);
+    return () => clearInterval(interval);
+  }, []);
+  const handleForceLogout = async (userId) => {
+    var _a2;
+    if (!((_a2 = activityStatusMap.get(userId)) == null ? void 0 : _a2.isActive)) {
+      return;
+    }
+    if (!confirm("Force logout this user? This will log them out immediately.")) return;
+    try {
+      setError(null);
+      await forceLogoutUser(userId, "Admin action - forced logout");
+      alert("User has been logged out");
+      const [updatedUsers, activityData] = await Promise.all([
+        getAllUsers(),
+        getTeacherActivityStatus()
+      ]);
+      setUsers(updatedUsers);
+      const activityMap = /* @__PURE__ */ new Map();
+      activityData.forEach((status) => {
+        activityMap.set(status.userId, status);
+      });
+      setActivityStatusMap(activityMap);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to force logout");
+    }
+  };
+  const handleResetPassword = async () => {
+    if (!selectedUser) return;
+    if (!tempPassword.trim()) {
+      alert("Please enter a temporary password");
+      return;
+    }
+    try {
+      setError(null);
+      await resetUserPassword(selectedUser.id, tempPassword);
+      alert(`Password reset for ${selectedUser.name}. Temporary password: ${tempPassword}`);
+      setShowResetModal(false);
+      setTempPassword("");
+      setSelectedUser(null);
+      const activityData = await getTeacherActivityStatus();
+      const activityMap = /* @__PURE__ */ new Map();
+      activityData.forEach((status) => {
+        activityMap.set(status.userId, status);
+      });
+      setActivityStatusMap(activityMap);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reset password");
+    }
+  };
+  const handleGeneratePassword = () => {
+    setTempPassword(generateTemporaryPassword());
+  };
+  const handleToggleAccount = async (userId, isDisabled) => {
+    try {
+      setError(null);
+      if (isDisabled) {
+        await enableUserAccount(userId);
+      } else {
+        await disableUserAccount(userId, "Admin action");
+      }
+      const [updatedUsers, activityData] = await Promise.all([
+        getAllUsers(),
+        getTeacherActivityStatus()
+      ]);
+      setUsers(updatedUsers);
+      const activityMap = /* @__PURE__ */ new Map();
+      activityData.forEach((status) => {
+        activityMap.set(status.userId, status);
+      });
+      setActivityStatusMap(activityMap);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update account status");
+    }
+  };
+  const handleRestoreGrade = async () => {
+    if (!selectedGrade || !selectedGrade.original_grade_value) return;
+    if (!confirm(`Restore grade from ${selectedGrade.grade_value} to ${selectedGrade.original_grade_value}?`)) {
+      return;
+    }
+    try {
+      setError(null);
+      await restoreGradeFromBackup(selectedGrade.id, restoreReason || "Admin restoration");
+      alert("Grade restored successfully");
+      setShowRestoreModal(false);
+      setSelectedGrade(null);
+      setRestoreReason("");
+      await refreshGradesWithChanges();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to restore grade");
+    }
+  };
+  if (loading) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { textAlign: "center", padding: "40px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Loading admin dashboard..." }) });
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "20px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("h1", { style: { marginBottom: "30px", color: "#1F2937" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-shield-lock", style: { marginRight: "10px", fontSize: "24px" } }),
+      "Admin Dashboard"
+    ] }),
+    error && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          padding: "16px",
+          marginBottom: "20px",
+          backgroundColor: "#FEE2E2",
+          border: "1px solid #FECACA",
+          borderRadius: "8px",
+          color: "#DC2626"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-exclamation-circle", style: { marginRight: "8px" } }),
+          error
+        ]
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px", marginBottom: "20px", borderBottom: "2px solid #E5E7EB" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          onClick: () => setActiveTab("users"),
+          style: {
+            padding: "10px 20px",
+            border: "none",
+            backgroundColor: activeTab === "users" ? "#10B981" : "transparent",
+            color: activeTab === "users" ? "white" : "#6B7280",
+            cursor: "pointer",
+            fontSize: "16px",
+            fontWeight: activeTab === "users" ? "600" : "400",
+            borderRadius: "8px 8px 0 0"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-people-fill", style: { marginRight: "8px" } }),
+            "User Management"
+          ]
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          onClick: () => setActiveTab("grades"),
+          style: {
+            padding: "10px 20px",
+            border: "none",
+            backgroundColor: activeTab === "grades" ? "#10B981" : "transparent",
+            color: activeTab === "grades" ? "white" : "#6B7280",
+            cursor: "pointer",
+            fontSize: "16px",
+            fontWeight: activeTab === "grades" ? "600" : "400",
+            borderRadius: "8px 8px 0 0"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-file-earmark-text-fill", style: { marginRight: "8px" } }),
+            "Grade Backup & Restore"
+          ]
+        }
+      )
+    ] }),
+    activeTab === "users" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { marginBottom: "20px", fontSize: "18px", color: "#374151" }, children: "User Access Control" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflowX: "auto", borderRadius: "8px", border: "1px solid #E5E7EB" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "table",
+        {
+          style: {
+            width: "100%",
+            borderCollapse: "collapse",
+            fontSize: "14px"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("thead", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { style: { backgroundColor: "#F9FAFB", borderBottom: "1px solid #E5E7EB" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Name" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Email" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Role" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Status" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Actions" })
+            ] }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: users.map((user, index) => {
+              var _a2, _b2, _c;
+              return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "tr",
+                {
+                  style: {
+                    borderBottom: index < users.length - 1 ? "1px solid #E5E7EB" : "none",
+                    backgroundColor: index % 2 === 0 ? "#FFFFFF" : "#F9FAFB"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px" }, children: user.name }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px", color: "#6B7280" }, children: user.email }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "span",
+                      {
+                        style: {
+                          display: "inline-block",
+                          padding: "4px 12px",
+                          borderRadius: "20px",
+                          fontSize: "12px",
+                          fontWeight: "600",
+                          backgroundColor: user.role === "admin" ? "#DBEAFE" : "#ECFDF5",
+                          color: user.role === "admin" ? "#0C4A6E" : "#065F46"
+                        },
+                        children: user.role.toUpperCase()
+                      }
+                    ) }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "span",
+                      {
+                        style: {
+                          display: "inline-block",
+                          padding: "4px 12px",
+                          borderRadius: "20px",
+                          fontSize: "12px",
+                          fontWeight: "600",
+                          backgroundColor: ((_a2 = activityStatusMap.get(user.id)) == null ? void 0 : _a2.isActive) ? "#ECFDF5" : "#FEE2E2",
+                          color: ((_b2 = activityStatusMap.get(user.id)) == null ? void 0 : _b2.isActive) ? "#10B981" : "#DC2626"
+                        },
+                        children: ((_c = activityStatusMap.get(user.id)) == null ? void 0 : _c.isActive) ? "ACTIVE" : "INACTIVE"
+                      }
+                    ) }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("td", { style: { padding: "12px" }, children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                        "button",
+                        {
+                          onClick: () => {
+                            setSelectedUser(user);
+                            setShowResetModal(true);
+                            setTempPassword("");
+                          },
+                          style: {
+                            padding: "6px 12px",
+                            marginRight: "8px",
+                            border: "1px solid #3B82F6",
+                            backgroundColor: "#3B82F6",
+                            color: "white",
+                            borderRadius: "4px",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                            fontWeight: "500"
+                          },
+                          title: "Reset user password",
+                          children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-key-fill", style: { marginRight: "4px" } }),
+                            "Reset Password"
+                          ]
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                        "button",
+                        {
+                          onClick: () => handleForceLogout(user.id),
+                          style: {
+                            padding: "6px 12px",
+                            marginRight: "8px",
+                            border: "1px solid #F59E0B",
+                            backgroundColor: "#F59E0B",
+                            color: "white",
+                            borderRadius: "4px",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                            fontWeight: "500"
+                          },
+                          title: "Force logout user",
+                          children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-box-arrow-right", style: { marginRight: "4px" } }),
+                            "Force Logout"
+                          ]
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                        "button",
+                        {
+                          onClick: () => handleToggleAccount(user.id, !!user.disabled_at),
+                          style: {
+                            padding: "6px 12px",
+                            border: `1px solid ${user.disabled_at ? "#10B981" : "#DC2626"}`,
+                            backgroundColor: user.disabled_at ? "#10B981" : "#DC2626",
+                            color: "white",
+                            borderRadius: "4px",
+                            cursor: "pointer",
+                            fontSize: "12px",
+                            fontWeight: "500"
+                          },
+                          title: user.disabled_at ? "Enable account" : "Disable account",
+                          children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "i",
+                              {
+                                className: `bi ${user.disabled_at ? "bi-check-circle-fill" : "bi-x-circle-fill"}`,
+                                style: { marginRight: "4px" }
+                              }
+                            ),
+                            user.disabled_at ? "Enable" : "Disable"
+                          ]
+                        }
+                      )
+                    ] })
+                  ]
+                },
+                user.id
+              );
+            }) })
+          ]
+        }
+      ) })
+    ] }),
+    activeTab === "grades" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: "18px", color: "#374151", margin: 0 }, children: "Grade Backup & Restoration" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            onClick: async () => {
+              if (!confirm("Repair grade backups? This will populate original values from activity logs.")) return;
+              try {
+                setError(null);
+                const result = await migrateGradeBackups();
+                alert(`Migration complete!
+Updated: ${result.updated} grades
+Skipped: ${result.skipped} grades`);
+                await refreshGradesWithChanges();
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Migration failed");
+              }
+            },
+            style: {
+              padding: "8px 16px",
+              backgroundColor: "#8B5CF6",
+              color: "white",
+              border: "none",
+              borderRadius: "4px",
+              cursor: "pointer",
+              fontSize: "12px",
+              fontWeight: "500"
+            },
+            title: "Repairs grade backups for existing modified grades",
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-wrench", style: { marginRight: "4px" } }),
+              "Repair Backups"
+            ]
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { overflowX: "auto", borderRadius: "8px", border: "1px solid #E5E7EB" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "table",
+        {
+          style: {
+            width: "100%",
+            borderCollapse: "collapse",
+            fontSize: "14px"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("thead", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { style: { backgroundColor: "#F9FAFB", borderBottom: "1px solid #E5E7EB" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Student" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Subject" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "center" }, children: "Current Grade" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "center" }, children: "Original Grade" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "center" }, children: "Status" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Modified By" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { padding: "12px", textAlign: "left" }, children: "Action" })
+            ] }) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: grades.map((grade, index) => {
+              var _a2, _b2;
+              return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "tr",
+                {
+                  style: {
+                    borderBottom: index < grades.length - 1 ? "1px solid #E5E7EB" : "none",
+                    backgroundColor: grade.isModified ? "#FEF3C7" : index % 2 === 0 ? "#FFFFFF" : "#F9FAFB"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px" }, children: ((_b2 = (_a2 = grade.expand) == null ? void 0 : _a2.student_id) == null ? void 0 : _b2.student_name) || "Unknown" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px" }, children: grade.subject }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px", textAlign: "center", fontWeight: "600" }, children: grade.grade_value }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "td",
+                      {
+                        style: {
+                          padding: "12px",
+                          textAlign: "center",
+                          color: grade.original_grade_value ? "#6B7280" : "#D1D5DB"
+                        },
+                        children: grade.original_grade_value || "-"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px", textAlign: "center" }, children: grade.isModified ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "span",
+                      {
+                        style: {
+                          display: "inline-block",
+                          padding: "4px 12px",
+                          borderRadius: "20px",
+                          fontSize: "12px",
+                          fontWeight: "600",
+                          backgroundColor: "#FEE2E2",
+                          color: "#DC2626"
+                        },
+                        children: "Modified"
+                      }
+                    ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "span",
+                      {
+                        style: {
+                          display: "inline-block",
+                          padding: "4px 12px",
+                          borderRadius: "20px",
+                          fontSize: "12px",
+                          fontWeight: "600",
+                          backgroundColor: "#ECFDF5",
+                          color: "#10B981"
+                        },
+                        children: "Original"
+                      }
+                    ) }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px", color: "#6B7280" }, children: grade.modifiedBy || "-" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "12px" }, children: grade.isModified && grade.original_grade_value && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                      "button",
+                      {
+                        onClick: () => {
+                          setSelectedGrade(grade);
+                          setShowRestoreModal(true);
+                          setRestoreReason("");
+                        },
+                        style: {
+                          padding: "6px 12px",
+                          border: "1px solid #10B981",
+                          backgroundColor: "#10B981",
+                          color: "white",
+                          borderRadius: "4px",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                          fontWeight: "500"
+                        },
+                        title: "Restore to original grade",
+                        children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-arrow-counterclockwise", style: { marginRight: "4px" } }),
+                          "Restore"
+                        ]
+                      }
+                    ) })
+                  ]
+                },
+                grade.id
+              );
+            }) })
+          ]
+        }
+      ) })
+    ] }),
+    showResetModal && selectedUser && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        style: {
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.5)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 1e3
+        },
+        children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              backgroundColor: "white",
+              borderRadius: "12px",
+              padding: "30px",
+              maxWidth: "500px",
+              boxShadow: "0 10px 25px rgba(0, 0, 0, 0.2)"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { marginBottom: "20px", color: "#1F2937" }, children: "Reset Password" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { marginBottom: "20px", color: "#6B7280" }, children: [
+                "Reset password for: ",
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: selectedUser.name }),
+                " (",
+                selectedUser.email,
+                ")"
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "20px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", marginBottom: "8px", fontWeight: "600", color: "#374151" }, children: "Temporary Password" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      type: "text",
+                      value: tempPassword,
+                      onChange: (e2) => setTempPassword(e2.target.value),
+                      placeholder: "Enter or generate password",
+                      style: {
+                        flex: 1,
+                        padding: "10px",
+                        border: "1px solid #D1D5DB",
+                        borderRadius: "6px",
+                        fontSize: "14px"
+                      }
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "button",
+                    {
+                      onClick: handleGeneratePassword,
+                      style: {
+                        padding: "10px 16px",
+                        border: "1px solid #3B82F6",
+                        backgroundColor: "#3B82F6",
+                        color: "white",
+                        borderRadius: "6px",
+                        cursor: "pointer",
+                        fontWeight: "500"
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-arrow-repeat", style: { marginRight: "4px" } }),
+                        "Generate"
+                      ]
+                    }
+                  )
+                ] })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { marginBottom: "20px", padding: "12px", backgroundColor: "#FFFBEB", borderRadius: "6px", color: "#92400E", fontSize: "13px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-info-circle", style: { marginRight: "8px" } }),
+                "User must change this password on next login."
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "12px", justifyContent: "flex-end" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    onClick: () => {
+                      setShowResetModal(false);
+                      setSelectedUser(null);
+                      setTempPassword("");
+                    },
+                    style: {
+                      padding: "10px 20px",
+                      border: "1px solid #D1D5DB",
+                      backgroundColor: "white",
+                      color: "#374151",
+                      borderRadius: "6px",
+                      cursor: "pointer",
+                      fontWeight: "500"
+                    },
+                    children: "Cancel"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "button",
+                  {
+                    onClick: handleResetPassword,
+                    style: {
+                      padding: "10px 20px",
+                      border: "none",
+                      backgroundColor: "#3B82F6",
+                      color: "white",
+                      borderRadius: "6px",
+                      cursor: "pointer",
+                      fontWeight: "500"
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-check-lg", style: { marginRight: "4px" } }),
+                      "Reset Password"
+                    ]
+                  }
+                )
+              ] })
+            ]
+          }
+        )
+      }
+    ),
+    showRestoreModal && selectedGrade && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        style: {
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.5)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 1e3
+        },
+        children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              backgroundColor: "white",
+              borderRadius: "12px",
+              padding: "30px",
+              maxWidth: "500px",
+              boxShadow: "0 10px 25px rgba(0, 0, 0, 0.2)"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { marginBottom: "20px", color: "#1F2937" }, children: "Restore Grade" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { marginBottom: "20px", color: "#6B7280" }, children: [
+                "Restore grade for: ",
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: ((_b = (_a = selectedGrade.expand) == null ? void 0 : _a.student_id) == null ? void 0 : _b.student_name) || "Unknown" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    padding: "16px",
+                    backgroundColor: "#FEF3C7",
+                    borderRadius: "8px",
+                    marginBottom: "20px"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "12px", color: "#374151" }, children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Current Grade:" }),
+                      " ",
+                      selectedGrade.grade_value
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "12px", color: "#374151" }, children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Original Grade:" }),
+                      " ",
+                      selectedGrade.original_grade_value
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#92400E" }, children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-arrow-down", style: { marginRight: "8px" } }),
+                      "This will restore the grade to its original value."
+                    ] })
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "20px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", marginBottom: "8px", fontWeight: "600", color: "#374151" }, children: "Reason for Restoration (Optional)" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "textarea",
+                  {
+                    value: restoreReason,
+                    onChange: (e2) => setRestoreReason(e2.target.value),
+                    placeholder: "e.g., Grade changed prematurely, user requested correction",
+                    style: {
+                      width: "100%",
+                      padding: "10px",
+                      border: "1px solid #D1D5DB",
+                      borderRadius: "6px",
+                      fontSize: "14px",
+                      fontFamily: "inherit",
+                      minHeight: "80px",
+                      boxSizing: "border-box"
+                    }
+                  }
+                )
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "12px", justifyContent: "flex-end" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    onClick: () => {
+                      setShowRestoreModal(false);
+                      setSelectedGrade(null);
+                      setRestoreReason("");
+                    },
+                    style: {
+                      padding: "10px 20px",
+                      border: "1px solid #D1D5DB",
+                      backgroundColor: "white",
+                      color: "#374151",
+                      borderRadius: "6px",
+                      cursor: "pointer",
+                      fontWeight: "500"
+                    },
+                    children: "Cancel"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "button",
+                  {
+                    onClick: handleRestoreGrade,
+                    style: {
+                      padding: "10px 20px",
+                      border: "none",
+                      backgroundColor: "#10B981",
+                      color: "white",
+                      borderRadius: "6px",
+                      cursor: "pointer",
+                      fontWeight: "500"
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-arrow-counterclockwise", style: { marginRight: "4px" } }),
+                      "Restore Grade"
+                    ]
+                  }
+                )
+              ] })
+            ]
+          }
+        )
+      }
+    )
+  ] });
+}
+function AdminPage() {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "20px", maxWidth: "1400px", margin: "0 auto" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(AdminDashboard, {}) });
+}
 const login = async (email, password) => {
   try {
     const authData = await pb.collection("users").authWithPassword(email, password);
     const user = authData.record;
     try {
-      await pb.collection("activity_logs").create({
-        user_id: user.id,
-        action_type: "LOGIN",
-        record_id: user.id,
-        old_value: JSON.stringify({}),
-        new_value: JSON.stringify({ email: user.email, name: user.name }),
-        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-        ip_address: getClientIpAddressSync()
-      });
+      await logAuthEvent(user.id, "LOGIN", { email: user.email, name: user.name });
     } catch (logError) {
       console.warn("Failed to log login activity (non-fatal):", logError);
     }
@@ -9194,6 +10848,14 @@ const login = async (email, password) => {
 };
 const logout = async () => {
   try {
+    const user = pb.authStore.record;
+    if (user) {
+      try {
+        await logAuthEvent(user.id, "LOGOUT", { email: user.email, name: user.name });
+      } catch (logError) {
+        console.warn("Failed to log logout activity (non-fatal):", logError);
+      }
+    }
     pb.authStore.clear();
   } catch (error) {
     console.error("Logout failed:", error);
@@ -9346,6 +11008,11 @@ function App() {
     }
     setLoading(false);
   }, []);
+  reactExports.useEffect(() => {
+    if (isLoggedIn && (currentUser == null ? void 0 : currentUser.role) === "teacher" && currentPage === "logs") {
+      setCurrentPage("grades");
+    }
+  }, [isLoggedIn, currentUser == null ? void 0 : currentUser.role]);
   const handleLoginSuccess = () => {
     const user = getAuthenticatedUser();
     setCurrentUser(user);
@@ -9363,11 +11030,13 @@ function App() {
   if (!isLoggedIn) {
     return /* @__PURE__ */ jsxRuntimeExports.jsx(LoginModal, { onLoginSuccess: handleLoginSuccess });
   }
+  const isAdmin = (currentUser == null ? void 0 : currentUser.role) === "admin";
+  const isTeacher = (currentUser == null ? void 0 : currentUser.role) === "teacher";
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app-container", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("nav", { className: "navbar", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "navbar-brand", children: /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { children: "Academic Grading System" }) }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("ul", { className: "navbar-menu", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        (isAdmin || isTeacher) && /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
           {
             className: currentPage === "dashboard" ? "nav-btn active" : "nav-btn",
@@ -9389,7 +11058,7 @@ function App() {
             ]
           }
         ) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        isAdmin && /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
           "button",
           {
             className: currentPage === "logs" ? "nav-btn active" : "nav-btn",
@@ -9397,6 +11066,28 @@ function App() {
             children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-clock-history" }),
               "Activity Logs"
+            ]
+          }
+        ) }),
+        isAdmin && /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            className: currentPage === "teacher-monitor" ? "nav-btn active" : "nav-btn",
+            onClick: () => setCurrentPage("teacher-monitor"),
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-people-fill" }),
+              "Teacher Monitor"
+            ]
+          }
+        ) }),
+        isAdmin && /* @__PURE__ */ jsxRuntimeExports.jsx("li", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            className: currentPage === "admin" ? "nav-btn active" : "nav-btn",
+            onClick: () => setCurrentPage("admin"),
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("i", { className: "bi bi-shield-lock" }),
+              "Admin Panel"
             ]
           }
         ) }),
@@ -9425,9 +11116,23 @@ function App() {
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("main", { className: "main-content", children: [
-      currentPage === "dashboard" && /* @__PURE__ */ jsxRuntimeExports.jsx(Dashboard, { currentUser }),
+      currentPage === "dashboard" && (isAdmin || isTeacher) && /* @__PURE__ */ jsxRuntimeExports.jsx(Dashboard, { currentUser }),
       currentPage === "grades" && /* @__PURE__ */ jsxRuntimeExports.jsx(Grades, { currentUser }),
-      currentPage === "logs" && /* @__PURE__ */ jsxRuntimeExports.jsx(Logs, {})
+      currentPage === "logs" && isAdmin && /* @__PURE__ */ jsxRuntimeExports.jsx(Logs, {}),
+      currentPage === "logs" && isTeacher && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "20px", textAlign: "center" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: "Access Denied" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Only admins can view activity logs." })
+      ] }),
+      currentPage === "teacher-monitor" && isAdmin && /* @__PURE__ */ jsxRuntimeExports.jsx(TeacherMonitor, {}),
+      currentPage === "teacher-monitor" && isTeacher && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "20px", textAlign: "center" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: "Access Denied" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Only admins can view teacher monitoring." })
+      ] }),
+      currentPage === "admin" && isAdmin && /* @__PURE__ */ jsxRuntimeExports.jsx(AdminPage, {}),
+      currentPage === "admin" && isTeacher && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "20px", textAlign: "center" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { children: "Access Denied" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "Only admins can access the admin panel." })
+      ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("footer", { className: "footer", children: /* @__PURE__ */ jsxRuntimeExports.jsx("p", { children: "© 2026 Notre Dame University - Academic Grading System" }) })
   ] });

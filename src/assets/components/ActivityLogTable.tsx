@@ -70,6 +70,7 @@ export default function ActivityLogTable({ logs }: ActivityLogTableProps) {
               <th>Old Value</th>
               <th>New Value</th>
               <th>IP Address</th>
+              <th>Device</th>
               <th>Timestamp</th>
             </tr>
           </thead>
@@ -104,6 +105,22 @@ export default function ActivityLogTable({ logs }: ActivityLogTableProps) {
                   }}>
                     <i className="bi bi-globe" style={{ fontSize: '14px' }}></i>
                     {log.ip_address || 'N/A'}
+                  </span>
+                </td>
+                <td>
+                  <span style={{ 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    gap: '6px',
+                    padding: '4px 8px',
+                    backgroundColor: '#E0F2FE',
+                    borderRadius: '6px',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                    color: '#0369A1'
+                  }}>
+                    <i className="bi bi-laptop" style={{ fontSize: '14px' }}></i>
+                    {log.device || 'N/A'}
                   </span>
                 </td>
                 <td>{new Date(log.timestamp).toLocaleString()}</td>

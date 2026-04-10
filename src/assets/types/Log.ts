@@ -9,6 +9,7 @@ export interface ActivityLog {
   new_value: string;
   timestamp: string;
   ip_address?: string;
+  device?: string;
   created: string;
   expand?: {
     user_id?: User;

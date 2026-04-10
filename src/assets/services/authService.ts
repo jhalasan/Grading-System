@@ -1,5 +1,5 @@
 import { pb } from './pocketbase';
-import { getClientIpAddressSync } from './ipService';
+import { logAuthEvent } from './logService';
 import type { User } from '../types/User';
 
 export const login = async (email: string, password: string): Promise<User> => {
@@ -9,15 +9,7 @@ export const login = async (email: string, password: string): Promise<User> => {
     
     // Log successful login
     try {
-      await pb.collection('activity_logs').create({
-        user_id: user.id,
-        action_type: 'LOGIN',
-        record_id: user.id,
-        old_value: JSON.stringify({}),
-        new_value: JSON.stringify({ email: user.email, name: user.name }),
-        timestamp: new Date().toISOString(),
-        ip_address: getClientIpAddressSync(),
-      });
+      await logAuthEvent(user.id, 'LOGIN', { email: user.email, name: user.name });
     } catch (logError) {
       console.warn('Failed to log login activity (non-fatal):', logError);
     }
@@ -31,6 +23,17 @@ export const login = async (email: string, password: string): Promise<User> => {
 
 export const logout = async (): Promise<void> => {
   try {
+    const user = pb.authStore.record;
+    
+    // Log logout before clearing auth
+    if (user) {
+      try {
+        await logAuthEvent(user.id, 'LOGOUT', { email: user.email, name: user.name });
+      } catch (logError) {
+        console.warn('Failed to log logout activity (non-fatal):', logError);
+      }
+    }
+    
     pb.authStore.clear();
   } catch (error) {
     console.error('Logout failed:', error);

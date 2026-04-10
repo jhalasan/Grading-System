@@ -202,11 +202,13 @@ The system is now complete and ready for your disaster simulation class activity
 2. **Don't know how to set up PocketBase?** → See POCKETBASE_SETUP.md
 3. **Want to understand the code?** → Read IMPLEMENTATION_SUMMARY.md
 4. **How do I use the system?** → Check README.md
+5. **Password reset not working?** → See USERS_COLLECTION_RULES_FIX.md (**CRITICAL FIX REQUIRED**)
 
 ### Error Messages
 - If you see "Collection not found" → Follow PocketBase setup guide
 - If grades show student IDs instead of names → Ensure expand relations are set
 - If activity log is empty → Make sure you edited a grade first
+- **If password reset shows 404 error** → Update users collection API rules (see USERS_COLLECTION_RULES_FIX.md)
 
 ---
 
